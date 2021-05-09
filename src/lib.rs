@@ -6,7 +6,7 @@ use std::slice;
 const INLINED_ELEMENTS: usize = 3;
 const FIRST_CHUNK_SIZE: usize = 8;
 
-/// An Urolled Exponential Linked List.
+/// An Unrolled Exponential Linked List.
 pub struct Uell<T> {
     len: usize,
     first_chunk: Option<NonNull<Chunk<T>>>,
@@ -72,26 +72,22 @@ impl<T: Copy + Default> Uell<T> {
         }
     }
 
-    /// Returns the number of elements that the last chunk supports,
-    /// `None` if there is no chunk allocated.
+    /// Returns the capacity of the last allocated chunk
+    /// or `None` if there is no chunk allocated.
     fn last_chunk_size(&self) -> Option<usize> {
-        if self.len > INLINED_ELEMENTS {
-            let mut len = self.len - INLINED_ELEMENTS;
-            let mut next_chunk_size = FIRST_CHUNK_SIZE;
-            while len > next_chunk_size {
-                len -= next_chunk_size;
-                next_chunk_size *= 2;
-            }
-            Some(next_chunk_size)
-        } else {
-            None
+        match self.last_chunk {
+            Some(chunk) => unsafe { Some(chunk.as_ref().capacity()) },
+            None => None,
         }
     }
 
     /// Allocates a new chunk that is twice the size of
     /// the last allocated chunk or 8 if there is no current chunk.
     fn push_empty_chunk(&mut self) -> &mut Chunk<T> {
-        let size = self.last_chunk_size().unwrap_or(FIRST_CHUNK_SIZE);
+        let size = self
+            .last_chunk_size()
+            .map(|size| size * 2)
+            .unwrap_or(FIRST_CHUNK_SIZE);
 
         let last_chunk = Box::leak(Chunk::new(size));
         let mut last_chunk_ptr = NonNull::from(last_chunk);
@@ -189,6 +185,10 @@ impl<T: Copy> Chunk<T> {
 
         let chunk_ptr = fatten::<T>(ptr, size);
         unsafe { Box::from_raw(chunk_ptr) }
+    }
+
+    fn capacity(&self) -> usize {
+        self.elems.len()
     }
 }
 
