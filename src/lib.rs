@@ -104,36 +104,6 @@ impl<T: Copy + Default> Uell<T> {
         self.last_chunk = Some(last_chunk_ptr);
         unsafe { last_chunk_ptr.as_mut() }
     }
-
-    fn chunks_iter(&self) -> impl Iterator<Item = &[T]> {
-        let mut next_chunk_size = FIRST_CHUNK_SIZE;
-        let mut current_chunk = None;
-        let mut len = self.len;
-        std::iter::from_fn(move || {
-            if len == 0 {
-                None
-            } else if current_chunk.is_none() {
-                current_chunk = self.first_chunk.as_ref();
-                let inlined_len = if current_chunk.is_none() { len } else { INLINED_ELEMENTS };
-                let slice = &self.elems[..inlined_len];
-                len -= inlined_len;
-                Some(slice)
-            } else {
-                match current_chunk.take() {
-                    Some(chunk) => {
-                        let chunk = unsafe { chunk.as_ref() };
-                        let size = if len < next_chunk_size { len } else { next_chunk_size };
-                        let slice = &chunk.elems[..size];
-                        current_chunk = chunk.next.as_ref();
-                        len -= size;
-                        next_chunk_size *= 2;
-                        Some(slice)
-                    }
-                    None => None,
-                }
-            }
-        })
-    }
 }
 
 impl<T: Copy + Default> Default for Uell<T> {
@@ -324,34 +294,6 @@ mod tests {
         }
 
         assert_eq!(uell.len(), count);
-    }
-
-    #[test]
-    /// Iterate over a small uell, and only the inlined elements.
-    fn small_chunk_iter() {
-        let mut uell = Uell::new();
-        for i in 0..INLINED_ELEMENTS {
-            uell.push(i);
-        }
-
-        let mut iter = uell.chunks_iter();
-        assert_eq!(iter.next(), Some(&[0, 1, 2][..]));
-        assert_eq!(iter.next(), None);
-    }
-
-    #[test]
-    /// Iterate over a small uell, and only the inlined elements.
-    fn bigger_chunk_iter() {
-        let mut uell = Uell::new();
-        for i in 0..(INLINED_ELEMENTS + 15) {
-            uell.push(i);
-        }
-
-        let mut iter = uell.chunks_iter();
-        assert_eq!(iter.next(), Some(&[0, 1, 2][..]));
-        assert_eq!(iter.next(), Some(&[3, 4, 5, 6, 7, 8, 9, 10][..]));
-        assert_eq!(iter.next(), Some(&[11, 12, 13, 14, 15, 16, 17][..]));
-        assert_eq!(iter.next(), None);
     }
 
     #[test]
