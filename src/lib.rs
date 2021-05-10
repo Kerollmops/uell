@@ -56,6 +56,10 @@ impl<T: Copy + Default> Uell<T> {
         self.len += 1;
     }
 
+    pub fn into_iter(self) -> IntoIter<T> {
+        IntoIter::new(self)
+    }
+
     /// Returns the number of elements that can be pushed
     /// before a new chunk is required.
     fn remaining_space(&self) -> usize {
@@ -84,10 +88,7 @@ impl<T: Copy + Default> Uell<T> {
     /// Allocates a new chunk that is twice the size of
     /// the last allocated chunk or 8 if there is no current chunk.
     fn push_empty_chunk(&mut self) -> &mut Chunk<T> {
-        let size = self
-            .last_chunk_size()
-            .map(|size| size * 2)
-            .unwrap_or(FIRST_CHUNK_SIZE);
+        let size = self.last_chunk_size().map(|size| size * 2).unwrap_or(FIRST_CHUNK_SIZE);
 
         let last_chunk = Box::leak(Chunk::new(size));
         let mut last_chunk_ptr = NonNull::from(last_chunk);
@@ -113,11 +114,7 @@ impl<T: Copy + Default> Uell<T> {
                 None
             } else if current_chunk.is_none() {
                 current_chunk = self.first_chunk.as_ref();
-                let inlined_len = if current_chunk.is_none() {
-                    len
-                } else {
-                    INLINED_ELEMENTS
-                };
+                let inlined_len = if current_chunk.is_none() { len } else { INLINED_ELEMENTS };
                 let slice = &self.elems[..inlined_len];
                 len -= inlined_len;
                 Some(slice)
@@ -125,11 +122,7 @@ impl<T: Copy + Default> Uell<T> {
                 match current_chunk.take() {
                     Some(chunk) => {
                         let chunk = unsafe { chunk.as_ref() };
-                        let size = if len < next_chunk_size {
-                            len
-                        } else {
-                            next_chunk_size
-                        };
+                        let size = if len < next_chunk_size { len } else { next_chunk_size };
                         let slice = &chunk.elems[..size];
                         current_chunk = chunk.next.as_ref();
                         len -= size;
@@ -155,6 +148,118 @@ impl<T> Drop for Uell<T> {
             let mut current_chunk = self.first_chunk.take().map(|p| Box::from_raw(p.as_ptr()));
             while let Some(mut chunk) = current_chunk.take() {
                 current_chunk = chunk.next.take().map(|p| Box::from_raw(p.as_ptr()));
+            }
+        }
+    }
+}
+
+struct IntoChunkIter<T> {
+    chunk: Option<Box<Chunk<T>>>,
+}
+
+impl<T> IntoChunkIter<T> {
+    fn new(chunk: Option<NonNull<Chunk<T>>>) -> IntoChunkIter<T> {
+        IntoChunkIter { chunk: chunk.map(|p| unsafe { Box::from_raw(p.as_ptr()) }) }
+    }
+}
+
+impl<T> Iterator for IntoChunkIter<T> {
+    type Item = Box<Chunk<T>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.chunk.take() {
+            Some(mut chunk) => {
+                let next_chunk = chunk.next.take().map(|p| unsafe { Box::from_raw(p.as_ptr()) });
+                self.chunk = next_chunk;
+                Some(chunk)
+            }
+            None => None,
+        }
+    }
+}
+
+pub struct IntoIter<T> {
+    inner: InnerIntoIter<T>,
+}
+
+enum InnerIntoIter<T> {
+    Inline {
+        elems: [T; INLINED_ELEMENTS],
+        inline_offset: usize,
+        chunks: Option<NonNull<Chunk<T>>>,
+        len: usize,
+    },
+    Chunks {
+        current_chunk: Option<Box<Chunk<T>>>,
+        chunk_offset: usize,
+        chunk_iter: IntoChunkIter<T>,
+        remaining_len: usize,
+    },
+}
+
+impl<T: Copy> IntoIter<T> {
+    fn new(mut uell: Uell<T>) -> IntoIter<T> {
+        IntoIter {
+            inner: InnerIntoIter::Inline {
+                elems: uell.elems,
+                inline_offset: 0,
+                chunks: uell.first_chunk.take(),
+                len: uell.len,
+            },
+        }
+    }
+
+    fn new_from_chunks(len: usize, chunks: Option<NonNull<Chunk<T>>>) -> IntoIter<T> {
+        let mut chunk_iter = IntoChunkIter::new(chunks);
+        IntoIter {
+            inner: InnerIntoIter::Chunks {
+                current_chunk: chunk_iter.next(),
+                chunk_offset: 0,
+                chunk_iter,
+                remaining_len: len - INLINED_ELEMENTS,
+            },
+        }
+    }
+}
+
+impl<T: Copy> Iterator for IntoIter<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match &mut self.inner {
+                InnerIntoIter::Inline { elems, inline_offset, chunks, len } => {
+                    if *inline_offset == elems.len() {
+                        *self = IntoIter::new_from_chunks(*len, chunks.take());
+                    } else if *inline_offset < *len {
+                        let elem = elems[*inline_offset];
+                        *inline_offset += 1;
+                        return Some(elem);
+                    } else {
+                        return None;
+                    }
+                }
+                InnerIntoIter::Chunks {
+                    current_chunk,
+                    chunk_iter,
+                    chunk_offset,
+                    remaining_len,
+                } => match current_chunk {
+                    Some(chunk) => {
+                        if *remaining_len == 0 {
+                            return None;
+                        } else if *chunk_offset == chunk.capacity() {
+                            *current_chunk = chunk_iter.next();
+                            *chunk_offset = 0;
+                        } else {
+                            let elem = chunk.elems[*chunk_offset];
+                            *chunk_offset += 1;
+                            *remaining_len -= 1;
+                            return Some(elem);
+                        }
+                    }
+                    None => return None,
+                },
             }
         }
     }
@@ -247,5 +352,49 @@ mod tests {
         assert_eq!(iter.next(), Some(&[3, 4, 5, 6, 7, 8, 9, 10][..]));
         assert_eq!(iter.next(), Some(&[11, 12, 13, 14, 15, 16, 17][..]));
         assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    /// Push a small amount of elements and therefore
+    /// only iter on the inlined elements.
+    fn small_push_into_iter() {
+        let mut uell = Uell::new();
+
+        for i in 0..(INLINED_ELEMENTS - 1) {
+            uell.push(i);
+        }
+
+        let mut iter = uell.into_iter();
+        assert_eq!(iter.next(), Some(0));
+        assert_eq!(iter.next(), Some(1));
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    /// Push a big amount of elements and therefore
+    /// iter on the inlined and then the chunked elements.
+    fn bigger_push_into_iter() {
+        let mut uell = Uell::new();
+
+        for i in 0..(INLINED_ELEMENTS + 100) {
+            uell.push(i);
+        }
+
+        assert!(uell.into_iter().eq(0..INLINED_ELEMENTS + 100));
+    }
+
+    #[test]
+    /// Push a big amount of elements and iter on the allocated chunks.
+    fn chunk_iter() {
+        let mut uell = Uell::new();
+
+        let len = INLINED_ELEMENTS + 100;
+        for i in 0..len {
+            uell.push(i);
+        }
+
+        let first_chunk = uell.first_chunk.take();
+        let iter = IntoChunkIter::new(first_chunk);
+        assert_eq!(iter.count(), 4);
     }
 }
