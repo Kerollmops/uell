@@ -5,28 +5,38 @@ use std::mem::{align_of, size_of};
 use std::ptr::NonNull;
 use std::slice;
 
+use self::alloc::{do_alloc, Allocator, Global};
+
 mod alloc;
 
 const INLINED_ELEMENTS: usize = 3;
 const FIRST_CHUNK_SIZE: usize = 8;
 
 /// An Unrolled Exponential Linked List.
-pub struct Uell<T> {
+pub struct Uell<T, A: Allocator + Clone = Global> {
     len: usize,
     first_chunk: Option<NonNull<Chunk<T>>>,
     last_chunk: Option<NonNull<Chunk<T>>>,
     last_elem_chunk: Option<NonNull<T>>,
     elems: [T; INLINED_ELEMENTS],
+    alloc: A,
 }
 
-impl<T: Copy + Default> Uell<T> {
+impl<T: Copy + Default> Uell<T, Global> {
     pub fn new() -> Uell<T> {
+        Uell::new_in(Global)
+    }
+}
+
+impl<T: Copy + Default, A: Allocator + Clone> Uell<T, A> {
+    pub fn new_in(alloc: A) -> Uell<T, A> {
         Uell {
             len: 0,
             first_chunk: None,
             last_chunk: None,
             last_elem_chunk: None,
             elems: [T::default(); INLINED_ELEMENTS],
+            alloc,
         }
     }
 
@@ -60,7 +70,7 @@ impl<T: Copy + Default> Uell<T> {
         self.len += 1;
     }
 
-    pub fn into_iter(self) -> IntoIter<T> {
+    pub fn into_iter(self) -> IntoIter<T, A> {
         IntoIter::new(self)
     }
 
@@ -94,7 +104,7 @@ impl<T: Copy + Default> Uell<T> {
     fn push_empty_chunk(&mut self) -> &mut Chunk<T> {
         let size = self.last_chunk_size().map(|size| size * 2).unwrap_or(FIRST_CHUNK_SIZE);
 
-        let last_chunk = Box::leak(Chunk::new(size));
+        let last_chunk = Box::leak(Chunk::new(&self.alloc, size));
         let mut last_chunk_ptr = NonNull::from(last_chunk);
 
         if self.first_chunk.is_none() {
@@ -116,7 +126,7 @@ impl<T: Copy + Default> Default for Uell<T> {
     }
 }
 
-impl<T> Drop for Uell<T> {
+impl<T, A: Allocator + Clone> Drop for Uell<T, A> {
     fn drop(&mut self) {
         unsafe {
             let mut current_chunk = self.first_chunk.take().map(|p| Box::from_raw(p.as_ptr()));
@@ -152,8 +162,9 @@ impl<T> Iterator for IntoChunkIter<T> {
     }
 }
 
-pub struct IntoIter<T> {
+pub struct IntoIter<T, A> {
     inner: InnerIntoIter<T>,
+    alloc: A,
 }
 
 enum InnerIntoIter<T> {
@@ -171,8 +182,8 @@ enum InnerIntoIter<T> {
     },
 }
 
-impl<T: Copy> IntoIter<T> {
-    fn new(mut uell: Uell<T>) -> IntoIter<T> {
+impl<T: Copy, A: Allocator + Clone> IntoIter<T, A> {
+    fn new(mut uell: Uell<T, A>) -> IntoIter<T, A> {
         IntoIter {
             inner: InnerIntoIter::Inline {
                 elems: uell.elems,
@@ -180,10 +191,11 @@ impl<T: Copy> IntoIter<T> {
                 chunks: uell.first_chunk.take(),
                 len: uell.len,
             },
+            alloc: uell.alloc.clone(),
         }
     }
 
-    fn new_from_chunks(len: usize, chunks: Option<NonNull<Chunk<T>>>) -> IntoIter<T> {
+    fn new_from_chunks(len: usize, chunks: Option<NonNull<Chunk<T>>>, alloc: A) -> IntoIter<T, A> {
         let mut chunk_iter = IntoChunkIter::new(chunks);
         IntoIter {
             inner: InnerIntoIter::Chunks {
@@ -192,11 +204,12 @@ impl<T: Copy> IntoIter<T> {
                 chunk_iter,
                 remaining_len: len - INLINED_ELEMENTS,
             },
+            alloc,
         }
     }
 }
 
-impl<T: Copy> Iterator for IntoIter<T> {
+impl<T: Copy, A: Allocator + Clone> Iterator for IntoIter<T, A> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -204,7 +217,7 @@ impl<T: Copy> Iterator for IntoIter<T> {
             match &mut self.inner {
                 InnerIntoIter::Inline { elems, inline_offset, chunks, len } => {
                     if *inline_offset == elems.len() {
-                        *self = IntoIter::new_from_chunks(*len, chunks.take());
+                        *self = IntoIter::new_from_chunks(*len, chunks.take(), self.alloc.clone());
                     } else if *inline_offset < *len {
                         let elem = elems[*inline_offset];
                         *inline_offset += 1;
@@ -246,19 +259,20 @@ struct Chunk<T> {
 }
 
 impl<T: Copy> Chunk<T> {
-    fn new(size: usize) -> Box<Chunk<T>> {
+    fn new<A: Allocator>(alloc: &A, size: usize) -> Box<Chunk<T>> {
         let ptr = {
             let elems_size = size * size_of::<T>();
             let header_size = size_of::<Option<NonNull<Chunk<T>>>>();
             let size = header_size + elems_size;
             let align = align_of::<Option<Box<Chunk<T>>>>();
             let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
-            unsafe { alloc_zeroed(layout) }
+            // unsafe { alloc_zeroed(layout) }
+            do_alloc(alloc, layout).unwrap()
         };
 
         // https://users.rust-lang.org/t/construct-fat-pointer-to-struct/29198/9
-        fn fatten<T>(data: *mut u8, len: usize) -> *mut Chunk<T> {
-            let slice = unsafe { slice::from_raw_parts(data as *mut (), len) };
+        fn fatten<T>(data: NonNull<u8>, len: usize) -> *mut Chunk<T> {
+            let slice = unsafe { slice::from_raw_parts(data.cast::<()>().as_ptr(), len) };
             slice as *const [()] as *mut Chunk<T>
         }
 
@@ -280,18 +294,32 @@ impl<T: Copy> Chunk<T> {
 #[derive(Clone, Copy, Debug)]
 pub struct BumpWrapper<'a>(pub &'a bumpalo::Bump);
 
-#[cfg(feature = "bumpalo")]
-#[test]
-fn test_bumpalo() {
-    use bumpalo::Bump;
-    let bump = Bump::new();
-    let mut map = HashMap::new_in(BumpWrapper(&bump));
-    map.insert(0, 1);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "bumpalo")]
+    #[test]
+    fn test_bumpalo() {
+        use bumpalo::Bump;
+        let bump = Bump::new();
+        let mut uell = Uell::new_in(BumpWrapper(&bump));
+        for i in 0..100 {
+            uell.push(i);
+        }
+    }
+
+    #[cfg(feature = "bumpalo")]
+    #[test]
+    fn test_bumpalo_into_iter() {
+        use bumpalo::Bump;
+        let bump = Bump::new();
+        let mut uell = Uell::new_in(BumpWrapper(&bump));
+        for i in 0..(INLINED_ELEMENTS + 100) {
+            uell.push(i);
+        }
+        assert!(uell.into_iter().eq(0..INLINED_ELEMENTS + 100));
+    }
 
     #[test]
     /// Push enough elements for them to be kept inlined (no allocated chunks).
