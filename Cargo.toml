@@ -7,3 +7,7 @@ edition = "2018"
 
 [dependencies]
 bumpalo = { version = "3.5.0", features = ["boxed"] }
+
+[dev-dependencies]
+quickcheck = "1"
+quickcheck_macros = "1"

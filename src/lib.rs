@@ -1,3 +1,10 @@
+#[cfg(test)]
+extern crate quickcheck;
+
+#[cfg(test)]
+#[macro_use(quickcheck)]
+extern crate quickcheck_macros;
+
 use std::alloc::Layout;
 use std::mem::{align_of, size_of};
 use std::ptr::NonNull;
@@ -350,5 +357,14 @@ mod tests {
         let first_chunk = uell.first_chunk.take();
         let iter = IntoChunkIter::new(first_chunk);
         assert_eq!(iter.count(), 4);
+    }
+
+    #[quickcheck]
+    fn qc_simple_push_and_iter(xs: Vec<u32>) -> bool {
+        let bump = Bump::new();
+        let mut uell = Uell::new_in(&bump);
+        xs.iter().copied().for_each(|x| uell.push(x));
+
+        uell.into_iter().eq(xs)
     }
 }
