@@ -89,7 +89,7 @@ impl<'b, T: Copy + Default> Uell<'b, T> {
         let size = self.last_chunk_size().map(|size| size * 2).unwrap_or(FIRST_CHUNK_SIZE);
 
         let last_chunk = Box::leak(Chunk::new(self.bump, size));
-        let mut last_chunk_ptr = NonNull::from(last_chunk);
+        let last_chunk_ptr = NonNull::from(last_chunk);
 
         if self.first_chunk.is_none() {
             self.first_chunk = Some(last_chunk_ptr);
@@ -100,7 +100,7 @@ impl<'b, T: Copy + Default> Uell<'b, T> {
         }
 
         self.last_chunk = Some(last_chunk_ptr);
-        unsafe { last_chunk_ptr.as_mut() }
+        unsafe { &mut *last_chunk_ptr.as_ptr() }
     }
 }
 
