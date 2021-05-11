@@ -1,2 +1,2 @@
 # uell
-A simple unrolled exponential linked list
+A [bumpalo-based](https://docs.rs/bumpalo) simple Unrolled Exponential Linked List.
