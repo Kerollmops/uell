@@ -1,28 +1,33 @@
-use std::alloc::{alloc_zeroed, Layout};
+use std::alloc::Layout;
 use std::mem::{align_of, size_of};
 use std::ptr::NonNull;
 use std::slice;
+
+use bumpalo::boxed::Box;
+use bumpalo::Bump;
 
 const INLINED_ELEMENTS: usize = 3;
 const FIRST_CHUNK_SIZE: usize = 8;
 
 /// An Unrolled Exponential Linked List.
-pub struct Uell<T> {
+pub struct Uell<'b, T> {
     len: usize,
     first_chunk: Option<NonNull<Chunk<T>>>,
     last_chunk: Option<NonNull<Chunk<T>>>,
     last_elem_chunk: Option<NonNull<T>>,
     elems: [T; INLINED_ELEMENTS],
+    bump: &'b Bump,
 }
 
-impl<T: Copy + Default> Uell<T> {
-    pub fn new() -> Uell<T> {
+impl<'b, T: Copy + Default> Uell<'b, T> {
+    pub fn new_in(bump: &'b Bump) -> Uell<T> {
         Uell {
             len: 0,
             first_chunk: None,
             last_chunk: None,
             last_elem_chunk: None,
             elems: [T::default(); INLINED_ELEMENTS],
+            bump,
         }
     }
 
@@ -56,7 +61,7 @@ impl<T: Copy + Default> Uell<T> {
         self.len += 1;
     }
 
-    pub fn into_iter(self) -> IntoIter<T> {
+    pub fn into_iter(self) -> IntoIter<'b, T> {
         IntoIter::new(self)
     }
 
@@ -90,7 +95,7 @@ impl<T: Copy + Default> Uell<T> {
     fn push_empty_chunk(&mut self) -> &mut Chunk<T> {
         let size = self.last_chunk_size().map(|size| size * 2).unwrap_or(FIRST_CHUNK_SIZE);
 
-        let last_chunk = Box::leak(Chunk::new(size));
+        let last_chunk = Box::leak(Chunk::new(self.bump, size));
         let mut last_chunk_ptr = NonNull::from(last_chunk);
 
         if self.first_chunk.is_none() {
@@ -106,13 +111,7 @@ impl<T: Copy + Default> Uell<T> {
     }
 }
 
-impl<T: Copy + Default> Default for Uell<T> {
-    fn default() -> Uell<T> {
-        Uell::new()
-    }
-}
-
-impl<T> Drop for Uell<T> {
+impl<'b, T> Drop for Uell<'b, T> {
     fn drop(&mut self) {
         unsafe {
             let mut current_chunk = self.first_chunk.take().map(|p| Box::from_raw(p.as_ptr()));
@@ -123,18 +122,18 @@ impl<T> Drop for Uell<T> {
     }
 }
 
-struct IntoChunkIter<T> {
-    chunk: Option<Box<Chunk<T>>>,
+struct IntoChunkIter<'b, T> {
+    chunk: Option<Box<'b, Chunk<T>>>,
 }
 
-impl<T> IntoChunkIter<T> {
-    fn new(chunk: Option<NonNull<Chunk<T>>>) -> IntoChunkIter<T> {
+impl<'b, T> IntoChunkIter<'b, T> {
+    fn new(chunk: Option<NonNull<Chunk<T>>>) -> IntoChunkIter<'b, T> {
         IntoChunkIter { chunk: chunk.map(|p| unsafe { Box::from_raw(p.as_ptr()) }) }
     }
 }
 
-impl<T> Iterator for IntoChunkIter<T> {
-    type Item = Box<Chunk<T>>;
+impl<'b, T> Iterator for IntoChunkIter<'b, T> {
+    type Item = Box<'b, Chunk<T>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.chunk.take() {
@@ -148,11 +147,11 @@ impl<T> Iterator for IntoChunkIter<T> {
     }
 }
 
-pub struct IntoIter<T> {
-    inner: InnerIntoIter<T>,
+pub struct IntoIter<'b, T> {
+    inner: InnerIntoIter<'b, T>,
 }
 
-enum InnerIntoIter<T> {
+enum InnerIntoIter<'b, T> {
     Inline {
         elems: [T; INLINED_ELEMENTS],
         inline_offset: usize,
@@ -160,15 +159,15 @@ enum InnerIntoIter<T> {
         len: usize,
     },
     Chunks {
-        current_chunk: Option<Box<Chunk<T>>>,
+        current_chunk: Option<Box<'b, Chunk<T>>>,
         chunk_offset: usize,
-        chunk_iter: IntoChunkIter<T>,
+        chunk_iter: IntoChunkIter<'b, T>,
         remaining_len: usize,
     },
 }
 
-impl<T: Copy> IntoIter<T> {
-    fn new(mut uell: Uell<T>) -> IntoIter<T> {
+impl<'b, T: Copy> IntoIter<'b, T> {
+    fn new(mut uell: Uell<'b, T>) -> IntoIter<T> {
         IntoIter {
             inner: InnerIntoIter::Inline {
                 elems: uell.elems,
@@ -179,7 +178,7 @@ impl<T: Copy> IntoIter<T> {
         }
     }
 
-    fn new_from_chunks(len: usize, chunks: Option<NonNull<Chunk<T>>>) -> IntoIter<T> {
+    fn new_from_chunks(len: usize, chunks: Option<NonNull<Chunk<T>>>) -> IntoIter<'b, T> {
         let mut chunk_iter = IntoChunkIter::new(chunks);
         IntoIter {
             inner: InnerIntoIter::Chunks {
@@ -192,7 +191,7 @@ impl<T: Copy> IntoIter<T> {
     }
 }
 
-impl<T: Copy> Iterator for IntoIter<T> {
+impl<'b, T: Copy> Iterator for IntoIter<'b, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -235,33 +234,39 @@ impl<T: Copy> Iterator for IntoIter<T> {
     }
 }
 
-// That's unsized
+// That's unsized, the fat-pointer pointing
+// to this struct knows the elems length.
 struct Chunk<T> {
     next: Option<NonNull<Chunk<T>>>,
     elems: [T],
 }
 
-impl<T: Copy> Chunk<T> {
-    fn new(size: usize) -> Box<Chunk<T>> {
+impl<T: Copy + Default> Chunk<T> {
+    fn new<'b>(bump: &'b Bump, size: usize) -> Box<'b, Chunk<T>> {
         let ptr = {
             let elems_size = size * size_of::<T>();
             let header_size = size_of::<Option<NonNull<Chunk<T>>>>();
             let size = header_size + elems_size;
             let align = align_of::<Option<Box<Chunk<T>>>>();
             let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
-            unsafe { alloc_zeroed(layout) }
+            bump.alloc_layout(layout)
         };
 
+        /// Constructs a typed fat-pointer from a raw pointer and the allocation size.
         // https://users.rust-lang.org/t/construct-fat-pointer-to-struct/29198/9
-        fn fatten<T>(data: *mut u8, len: usize) -> *mut Chunk<T> {
-            let slice = unsafe { slice::from_raw_parts(data as *mut (), len) };
+        fn fatten<T>(data: NonNull<u8>, len: usize) -> *mut Chunk<T> {
+            let slice = unsafe { slice::from_raw_parts(data.as_ptr() as *mut (), len) };
             slice as *const [()] as *mut Chunk<T>
         }
 
         let chunk_ptr = fatten::<T>(ptr, size);
-        unsafe { Box::from_raw(chunk_ptr) }
+        let mut chunk = unsafe { Box::from_raw(chunk_ptr) };
+        chunk.next = None;
+        chunk
     }
+}
 
+impl<T: Copy> Chunk<T> {
     fn capacity(&self) -> usize {
         self.elems.len()
     }
@@ -274,7 +279,8 @@ mod tests {
     #[test]
     /// Push enough elements for them to be kept inlined (no allocated chunks).
     fn small_push() {
-        let mut uell = Uell::new();
+        let bump = Bump::new();
+        let mut uell = Uell::new_in(&bump);
 
         for i in 0..INLINED_ELEMENTS {
             uell.push(i);
@@ -286,7 +292,8 @@ mod tests {
     #[test]
     /// Push enough elements to trigger a chunk allocation.
     fn bigger_push() {
-        let mut uell = Uell::new();
+        let bump = Bump::new();
+        let mut uell = Uell::new_in(&bump);
 
         let count = INLINED_ELEMENTS + 10;
         for i in 0..count {
@@ -300,7 +307,8 @@ mod tests {
     /// Push a small amount of elements and therefore
     /// only iter on the inlined elements.
     fn small_push_into_iter() {
-        let mut uell = Uell::new();
+        let bump = Bump::new();
+        let mut uell = Uell::new_in(&bump);
 
         for i in 0..(INLINED_ELEMENTS - 1) {
             uell.push(i);
@@ -316,7 +324,8 @@ mod tests {
     /// Push a big amount of elements and therefore
     /// iter on the inlined and then the chunked elements.
     fn bigger_push_into_iter() {
-        let mut uell = Uell::new();
+        let bump = Bump::new();
+        let mut uell = Uell::new_in(&bump);
 
         for i in 0..(INLINED_ELEMENTS + 100) {
             uell.push(i);
@@ -328,7 +337,8 @@ mod tests {
     #[test]
     /// Push a big amount of elements and iter on the allocated chunks.
     fn chunk_iter() {
-        let mut uell = Uell::new();
+        let bump = Bump::new();
+        let mut uell = Uell::new_in(&bump);
 
         let len = INLINED_ELEMENTS + 100;
         for i in 0..len {
