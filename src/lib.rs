@@ -241,6 +241,16 @@ impl<'b, T: Copy> Iterator for IntoIter<'b, T> {
             }
         }
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self.inner {
+            InnerIntoIter::Inline { inline_offset, len, .. } => {
+                let remaining_len = len - inline_offset;
+                (remaining_len, Some(remaining_len))
+            }
+            InnerIntoIter::Chunks { remaining_len, .. } => (remaining_len, Some(remaining_len)),
+        }
+    }
 }
 
 // That's unsized, the fat-pointer pointing
