@@ -61,10 +61,6 @@ impl<'b, T: Copy + Default> Uell<'b, T> {
         self.len += 1;
     }
 
-    pub fn into_iter(self) -> IntoIter<'b, T> {
-        IntoIter::new(self)
-    }
-
     /// Returns the number of elements that can be pushed
     /// before a new chunk is required.
     fn remaining_space(&self) -> usize {
@@ -84,10 +80,7 @@ impl<'b, T: Copy + Default> Uell<'b, T> {
     /// Returns the capacity of the last allocated chunk
     /// or `None` if there is no chunk allocated.
     fn last_chunk_size(&self) -> Option<usize> {
-        match self.last_chunk {
-            Some(chunk) => unsafe { Some(chunk.as_ref().capacity()) },
-            None => None,
-        }
+        self.last_chunk.map(|chunk| unsafe { chunk.as_ref().capacity() })
     }
 
     /// Allocates a new chunk that is twice the size of
@@ -119,6 +112,15 @@ impl<'b, T> Drop for Uell<'b, T> {
                 current_chunk = chunk.next.take().map(|p| Box::from_raw(p.as_ptr()));
             }
         }
+    }
+}
+
+impl<'b, T: 'b + Copy> IntoIterator for Uell<'b, T> {
+    type Item = T;
+    type IntoIter = IntoIter<'b, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        IntoIter::new(self)
     }
 }
 
@@ -242,12 +244,12 @@ struct Chunk<T> {
 }
 
 impl<T: Copy + Default> Chunk<T> {
-    fn new<'b>(bump: &'b Bump, size: usize) -> Box<'b, Chunk<T>> {
+    fn new(bump: &Bump, size: usize) -> Box<'_, Chunk<T>> {
         let ptr = {
             let elems_size = size * size_of::<T>();
             let header_size = size_of::<Option<NonNull<Chunk<T>>>>();
             let size = header_size + elems_size;
-            let align = align_of::<Option<Box<Chunk<T>>>>();
+            let align = align_of::<Option<Box<'_, Chunk<T>>>>();
             let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
             bump.alloc_layout(layout)
         };
