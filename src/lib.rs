@@ -38,6 +38,15 @@ impl<'b, T: Copy + Default> Uell<'b, T> {
         }
     }
 
+    pub fn from_iter_in<I>(iter: I, bump: &'b Bump) -> Uell<T>
+    where
+        I: IntoIterator<Item = T>,
+    {
+        let mut uell = Uell::new_in(bump);
+        iter.into_iter().for_each(|elem| uell.push(elem));
+        uell
+    }
+
     pub fn len(&self) -> usize {
         self.len
     }
