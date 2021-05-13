@@ -4,6 +4,9 @@ description = "A bumpalo-based Unrolled Exponential Linked List"
 version = "0.1.0"
 authors = ["Kerollmops <renault.cle@gmail.com>"]
 edition = "2018"
+license-file = "LICENSE"
+documentation = "https://docs.rs/uell"
+repository = "https://github.com/Kerollmops/uell"
 
 [dependencies]
 bumpalo = { version = "3.5.0", features = ["boxed"] }

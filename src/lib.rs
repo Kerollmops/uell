@@ -1,3 +1,5 @@
+//! An unrolled exponential linked list backed by a [`bumpalo`](https://docs.rs/bumpalo) allocator.
+
 #[cfg(test)]
 extern crate quickcheck;
 
@@ -16,7 +18,13 @@ use bumpalo::Bump;
 const INLINED_ELEMENTS: usize = 3;
 const FIRST_CHUNK_SIZE: usize = 8;
 
-/// An Unrolled Exponential Linked List.
+/// An unrolled exponential linked list.
+///
+/// An append-only container, that can be useful
+/// in case reallocating memory can be inefficient.
+///
+/// It is backed by a bumpalo allocator where reallocating memory
+/// means wasting memory, as bumpalo cannot reuse freed memory.
 pub struct Uell<'b, T> {
     len: usize,
     first_chunk: Option<NonNull<Chunk<T>>>,
@@ -27,6 +35,10 @@ pub struct Uell<'b, T> {
 }
 
 impl<'b, T: Copy + Default> Uell<'b, T> {
+    /// Constructs a new, empty `Uell<'bump, T>`.
+    ///
+    /// The unrolled exponential linked list will not allocate
+    /// until elements are pushed onto it.
     pub fn new_in(bump: &'b Bump) -> Uell<T> {
         Uell {
             len: 0,
@@ -38,6 +50,7 @@ impl<'b, T: Copy + Default> Uell<'b, T> {
         }
     }
 
+    /// Construct a new `Uell<'bump, T>` from the given iterator's items.
     pub fn from_iter_in<I>(iter: I, bump: &'b Bump) -> Uell<T>
     where
         I: IntoIterator<Item = T>,
@@ -47,14 +60,17 @@ impl<'b, T: Copy + Default> Uell<'b, T> {
         uell
     }
 
+    /// Returns the number of elements in the linked list, also referred to as its 'length'.
     pub fn len(&self) -> usize {
         self.len
     }
 
+    /// Returns true if the linked list contains no elements.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    /// Appends an element to the back of the collection.
     pub fn push(&mut self, elem: T) {
         if self.len < INLINED_ELEMENTS {
             unsafe { *self.elems.get_unchecked_mut(self.len) = elem };
@@ -165,6 +181,10 @@ impl<'b, T> Iterator for IntoChunkIter<'b, T> {
     }
 }
 
+/// An iterator that moves out of an unrolled exponential linked list.
+///
+/// This struct is created by the `into_iter` method on `Uell`
+/// (provided by the `IntoIterator` trait).
 pub struct IntoIter<'b, T> {
     inner: InnerIntoIter<'b, T>,
 }
